@@ -580,6 +580,43 @@ onCommand('addToContext', (payload) => {
   });
 });
 
+// Listen for createSessionWithPrompt command from extension (Explain, Improve Code)
+onCommand('createSessionWithPrompt', (payload) => {
+  const { prompt } = payload as { prompt: string };
+  
+  Promise.all([
+    import('../../ui/src/stores/useSessionStore'),
+    import('../../ui/src/stores/useConfigStore'),
+  ]).then(([{ useSessionStore }, { useConfigStore }]) => {
+    const sessionStore = useSessionStore.getState();
+    const configStore = useConfigStore.getState();
+    
+    // Open a new session draft first
+    sessionStore.openNewSessionDraft();
+    
+    // Get current provider/model/agent configuration
+    const { currentProviderId, currentModelId, currentAgentName } = configStore;
+    
+    if (currentProviderId && currentModelId) {
+      // Send the message - this will create the session from the draft and send
+      sessionStore.sendMessage(
+        prompt,
+        currentProviderId,
+        currentModelId,
+        currentAgentName ?? undefined,
+        undefined, // attachments
+        undefined, // agentMentionName
+        undefined  // additionalParts
+      ).catch((error: unknown) => {
+        console.error('[OpenChamber] Failed to send prompt:', error);
+      });
+    } else {
+      // If no provider/model configured, just set the text and let user send manually
+      sessionStore.setPendingInputText(prompt);
+    }
+  });
+});
+
 import('../../ui/src/main')
   .then(async () => {
     await waitForUiMount();

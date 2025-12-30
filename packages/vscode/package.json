@@ -65,6 +65,14 @@
       {
         "command": "openchamber.addToContext",
         "title": "Add to Context"
+      },
+      {
+        "command": "openchamber.explain",
+        "title": "Explain"
+      },
+      {
+        "command": "openchamber.improveCode",
+        "title": "Improve Code"
       }
     ],
     "submenus": [
@@ -81,6 +89,12 @@
         }
       ],
       "openchamber.submenu": [
+        {
+          "command": "openchamber.explain"
+        },
+        {
+          "command": "openchamber.improveCode"
+        },
         {
           "command": "openchamber.addToContext"
         }
