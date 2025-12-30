@@ -5,7 +5,8 @@ import { ChatView, SettingsView } from '@/components/views';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { ContextUsageDisplay } from '@/components/ui/ContextUsageDisplay';
-import { RiAddLine, RiArrowLeftLine, RiSettings3Line } from '@remixicon/react';
+import { RiAddLine, RiArrowLeftLine, RiRobot2Line, RiSettings3Line } from '@remixicon/react';
+import { useRuntimeAPIs } from '@/hooks/useRuntimeAPIs';
 
 // Width threshold for mobile vs desktop layout in settings
 const MOBILE_WIDTH_THRESHOLD = 550;
@@ -33,6 +34,7 @@ export const VSCodeLayout: React.FC = () => {
   const messages = useSessionStore((state) => state.messages);
   const [hasInitializedOnce, setHasInitializedOnce] = React.useState<boolean>(() => configInitialized);
   const [isInitializing, setIsInitializing] = React.useState<boolean>(false);
+  const { vscode: vscodeAPI } = useRuntimeAPIs();
 
   // Navigate to chat when a session is selected
   React.useEffect(() => {
@@ -51,6 +53,10 @@ export const VSCodeLayout: React.FC = () => {
   const handleBackToSessions = React.useCallback(() => {
     setCurrentView('sessions');
   }, []);
+
+  const handleOpenAgentManager = React.useCallback(() => {
+    vscodeAPI?.openAgentManager();
+  }, [vscodeAPI]);
 
   // Listen for connection status changes
   React.useEffect(() => {
@@ -152,6 +158,7 @@ export const VSCodeLayout: React.FC = () => {
         <div className="flex flex-col h-full">
           <VSCodeHeader 
             title="Sessions" 
+            onAgentManager={handleOpenAgentManager}
           />
           <div className="flex-1 overflow-hidden">
             <SessionSidebar
@@ -195,10 +202,11 @@ interface VSCodeHeaderProps {
   onBack?: () => void;
   onNewSession?: () => void;
   onSettings?: () => void;
+  onAgentManager?: () => void;
   showContextUsage?: boolean;
 }
 
-const VSCodeHeader: React.FC<VSCodeHeaderProps> = ({ title, showBack, onBack, onNewSession, onSettings, showContextUsage }) => {
+const VSCodeHeader: React.FC<VSCodeHeaderProps> = ({ title, showBack, onBack, onNewSession, onSettings, onAgentManager, showContextUsage }) => {
   const { getCurrentModel } = useConfigStore();
   const getContextUsage = useSessionStore((state) => state.getContextUsage);
 
@@ -229,6 +237,15 @@ const VSCodeHeader: React.FC<VSCodeHeaderProps> = ({ title, showBack, onBack, on
           aria-label="New session"
         >
           <RiAddLine className="h-5 w-5" />
+        </button>
+      )}
+      {onAgentManager && (
+        <button
+          onClick={onAgentManager}
+          className="inline-flex h-9 w-9 items-center justify-center p-2 text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          aria-label="Open Agent Manager"
+        >
+          <RiRobot2Line className="h-5 w-5" />
         </button>
       )}
       {onSettings && (

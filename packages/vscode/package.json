@@ -75,6 +75,11 @@
         "title": "OpenChamber: Show OpenCode Status"
       },
       {
+        "command": "openchamber.openAgentManager",
+        "title": "OpenChamber: Open Agent Manager",
+        "icon": "$(circuit-board)"
+      },
+      {
         "command": "openchamber.addToContext",
         "title": "Add to Context"
       },
