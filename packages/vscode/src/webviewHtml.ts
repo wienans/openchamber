@@ -2,16 +2,19 @@ import * as vscode from 'vscode';
 import { getThemeKindName } from './theme';
 import type { ConnectionStatus } from './opencode';
 
+export type PanelType = 'chat' | 'agentManager';
+
 export interface WebviewHtmlOptions {
   webview: vscode.Webview;
   extensionUri: vscode.Uri;
   workspaceFolder: string;
   initialStatus: ConnectionStatus;
   cliAvailable: boolean;
+  panelType?: PanelType;
 }
 
 export function getWebviewHtml(options: WebviewHtmlOptions): string {
-  const { webview, extensionUri, workspaceFolder, initialStatus, cliAvailable } = options;
+  const { webview, extensionUri, workspaceFolder, initialStatus, cliAvailable, panelType = 'chat' } = options;
 
   const scriptPath = vscode.Uri.joinPath(extensionUri, 'dist', 'webview', 'assets', 'index.js');
   const scriptUri = webview.asWebviewUri(scriptPath);
@@ -127,7 +130,8 @@ export function getWebviewHtml(options: WebviewHtmlOptions): string {
       workspaceFolder: "${workspaceFolder.replace(/\\/g, '\\\\')}",
       theme: "${themeKind}",
       connectionStatus: "${initialStatus}",
-      cliAvailable: ${cliAvailable}
+      cliAvailable: ${cliAvailable},
+      panelType: "${panelType}"
     };
     window.__OPENCHAMBER_HOME__ = "${workspaceFolder.replace(/\\/g, '\\\\')}";
     

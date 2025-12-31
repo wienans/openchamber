@@ -282,6 +282,7 @@ export class AgentManagerPanelProvider {
       workspaceFolder,
       initialStatus: this._cachedStatus,
       cliAvailable,
+      panelType: 'agentManager',
     });
   }
 }
