@@ -1090,6 +1090,49 @@ export async function getCurrentGitIdentity(directory: string): Promise<GitIdent
 }
 
 /**
+ * Escape an SSH key path for use in core.sshCommand.
+ * Handles Windows/Unix differences and prevents command injection.
+ */
+function escapeSshKeyPath(sshKeyPath: string): string {
+  // Validate: reject paths with characters that could enable injection
+  // Allow only alphanumeric, path separators, dots, dashes, underscores, spaces, and colons (for Windows drives)
+  const dangerousChars = /[`$\\!"';&|<>(){}[\]*?#~]/;
+  if (dangerousChars.test(sshKeyPath)) {
+    throw new Error(`SSH key path contains invalid characters: ${sshKeyPath}`);
+  }
+
+  const isWindows = process.platform === 'win32';
+  
+  if (isWindows) {
+    // On Windows, Git (via MSYS/MinGW) expects Unix-style paths
+    // Convert backslashes to forward slashes and handle drive letters
+    let unixPath = sshKeyPath.replace(/\\/g, '/');
+    
+    // Convert "C:/path" to "/c/path" for MSYS compatibility
+    const driveMatch = unixPath.match(/^([A-Za-z]):\//);
+    if (driveMatch) {
+      unixPath = `/${driveMatch[1].toLowerCase()}${unixPath.slice(2)}`;
+    }
+    
+    // Use single quotes for the path (prevents shell interpretation)
+    return `'${unixPath}'`;
+  } else {
+    // On Unix, use single quotes and escape any single quotes in the path
+    // Single quotes prevent all shell interpretation except for single quotes themselves
+    const escaped = sshKeyPath.replace(/'/g, "'\\''");
+    return `'${escaped}'`;
+  }
+}
+
+/**
+ * Build the SSH command string for git config
+ */
+function buildSshCommand(sshKeyPath: string): string {
+  const escapedPath = escapeSshKeyPath(sshKeyPath);
+  return `ssh -i ${escapedPath} -o IdentitiesOnly=yes`;
+}
+
+/**
  * Set git identity for a directory
  */
 export async function setGitIdentity(
@@ -1100,12 +1143,15 @@ export async function setGitIdentity(
 ): Promise<{ success: boolean }> {
   const repo = await getRepository(directory);
   
+  // Build SSH command once if needed
+  const sshCommand = sshKey ? buildSshCommand(sshKey) : null;
+  
   if (repo) {
     try {
       await repo.setConfig('user.name', userName);
       await repo.setConfig('user.email', userEmail);
-      if (sshKey) {
-        await repo.setConfig('core.sshCommand', `ssh -i "${sshKey}" -o IdentitiesOnly=yes`);
+      if (sshCommand) {
+        await repo.setConfig('core.sshCommand', sshCommand);
       }
       return { success: true };
     } catch (error) {
@@ -1116,8 +1162,8 @@ export async function setGitIdentity(
   // Fallback to raw git
   await execGit(['config', 'user.name', userName], directory);
   await execGit(['config', 'user.email', userEmail], directory);
-  if (sshKey) {
-    await execGit(['config', 'core.sshCommand', `ssh -i "${sshKey}" -o IdentitiesOnly=yes`], directory);
+  if (sshCommand) {
+    await execGit(['config', 'core.sshCommand', sshCommand], directory);
   }
 
   return { success: true };
