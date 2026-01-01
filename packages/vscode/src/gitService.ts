@@ -818,44 +818,96 @@ export async function createGitCommit(
 // ============== Remote Operations ==============
 
 /**
+ * Convert options to an array of git arguments.
+ * Supports both array format ['--set-upstream', '--force'] and 
+ * object format { '--set-upstream': null, '--force': true }
+ */
+function normalizeGitOptions(options?: string[] | Record<string, unknown>): string[] {
+  if (!options) return [];
+  
+  if (Array.isArray(options)) {
+    return options;
+  }
+  
+  // Object format: { '--set-upstream': null, '--force': true, '--remote': 'origin' }
+  const args: string[] = [];
+  for (const [key, value] of Object.entries(options)) {
+    if (value === null || value === true) {
+      args.push(key);
+    } else if (value !== false && value !== undefined) {
+      args.push(key, String(value));
+    }
+  }
+  return args;
+}
+
+/**
+ * Check if options contain a specific flag
+ */
+function hasOption(options: string[] | Record<string, unknown> | undefined, flag: string): boolean {
+  if (!options) return false;
+  
+  if (Array.isArray(options)) {
+    return options.includes(flag);
+  }
+  
+  return flag in options && options[flag] !== false;
+}
+
+/**
  * Push to remote
  */
 export async function gitPush(
   directory: string,
-  options?: { remote?: string; branch?: string; setUpstream?: boolean }
+  options?: { remote?: string; branch?: string; options?: string[] | Record<string, unknown> }
 ): Promise<{ success: boolean; pushed: Array<{ local: string; remote: string }>; repo: string; ref: unknown }> {
   const repo = await getRepository(directory);
+  const remote = options?.remote || 'origin';
+  const branch = options?.branch;
+  const gitOptions = options?.options;
+  
+  // Determine if we should set upstream (default true if no options specified)
+  const setUpstream = gitOptions 
+    ? hasOption(gitOptions, '--set-upstream') || hasOption(gitOptions, '-u')
+    : true;
   
   if (repo) {
     try {
-      const remote = options?.remote;
-      const branch = options?.branch;
-      const setUpstream = options?.setUpstream ?? true;
-      
       await repo.push(remote, branch, setUpstream);
       
       return {
         success: true,
-        pushed: [{ local: branch || '', remote: remote || 'origin' }],
+        pushed: [{ local: branch || '', remote }],
         repo: directory,
         ref: null,
       };
     } catch (error) {
-      console.error('[GitService] Failed to push:', error);
+      console.error('[GitService] Failed to push via VS Code API:', error);
     }
   }
 
-  // Fallback to raw git
+  // Fallback to raw git - use full options here
   const args = ['push'];
-  if (options?.setUpstream) args.push('-u');
-  if (options?.remote) args.push(options.remote);
-  if (options?.branch) args.push(options.branch);
+  
+  // Add normalized options
+  const normalizedOptions = normalizeGitOptions(gitOptions);
+  
+  // If no options provided, default to -u for upstream
+  if (normalizedOptions.length === 0) {
+    args.push('-u');
+  } else {
+    args.push(...normalizedOptions);
+  }
+  
+  // Add remote and branch
+  args.push(remote);
+  if (branch) args.push(branch);
 
   const result = await execGit(args, directory);
   
   return {
     success: result.exitCode === 0,
-    pushed: [],
+    pushed: result.exitCode === 0 ? [{ local: branch || '', remote }] : [],
     repo: directory,
     ref: null,
   };

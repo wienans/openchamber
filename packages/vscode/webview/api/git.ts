@@ -137,7 +137,7 @@ export const createVSCodeGitAPI = (): GitAPI => ({
       directory,
       remote: options?.remote,
       branch: options?.branch,
-      setUpstream: true,
+      options: options?.options,
     });
   },
 

@@ -1227,16 +1227,16 @@ export async function handleBridgeMessage(message: BridgeRequest, ctx?: BridgeCo
       }
 
       case 'api:git/push': {
-        const { directory, remote, branch, setUpstream } = (payload || {}) as { 
+        const { directory, remote, branch, options } = (payload || {}) as { 
           directory?: string; 
           remote?: string;
           branch?: string;
-          setUpstream?: boolean;
+          options?: string[] | Record<string, unknown>;
         };
         if (!directory) {
           return { id, type, success: false, error: 'Directory is required' };
         }
-        const result = await gitService.gitPush(directory, { remote, branch, setUpstream });
+        const result = await gitService.gitPush(directory, { remote, branch, options });
         return { id, type, success: true, data: result };
       }
 
