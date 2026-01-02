@@ -3,46 +3,22 @@ import {
   RiGitBranchLine,
   RiMore2Line,
   RiSettings3Line,
+  RiArrowDownSLine,
+  RiCheckLine,
 } from '@remixicon/react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { ProviderLogo } from '@/components/ui/ProviderLogo';
 import { useAgentGroupsStore, type AgentGroup, type AgentGroupSession } from '@/stores/useAgentGroupsStore';
-import { useDirectoryStore } from '@/stores/useDirectoryStore';
-
-interface SessionTabProps {
-  session: AgentGroupSession;
-  isSelected: boolean;
-  onSelect: () => void;
-}
-
-const SessionTab: React.FC<SessionTabProps> = ({ session, isSelected, onSelect }) => {
-  return (
-    <button
-      type="button"
-      onClick={onSelect}
-      className={cn(
-        'flex-shrink-0 min-w-0 flex flex-col gap-0.5 px-3 py-2 rounded-lg border transition-colors text-left',
-        isSelected 
-          ? 'bg-primary/10 dark:bg-primary/15 border-primary/30' 
-          : 'bg-background/50 border-border/30 hover:bg-background/80 hover:border-border/50'
-      )}
-    >
-      <div className="flex items-center gap-2">
-        <ProviderLogo providerId={session.providerId} className="h-4 w-4 flex-shrink-0" />
-        <span className="typography-ui-label text-foreground truncate max-w-[120px]">
-          {session.modelId}
-        </span>
-      </div>
-      {session.branch && (
-        <div className="flex items-center gap-1 typography-micro text-muted-foreground/60">
-          <RiGitBranchLine className="h-3 w-3" />
-          <span className="truncate max-w-[100px]">{session.worktreeMetadata?.label || session.branch}</span>
-        </div>
-      )}
-    </button>
-  );
-};
+import { useSessionStore } from '@/stores/useSessionStore';
+import { ChatContainer } from '@/components/chat/ChatContainer';
+import { ChatErrorBoundary } from '@/components/chat/ChatErrorBoundary';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 
 interface AgentGroupDetailProps {
   group: AgentGroup;
@@ -54,7 +30,7 @@ export const AgentGroupDetail: React.FC<AgentGroupDetailProps> = ({
   className,
 }) => {
   const { selectedSessionId, selectSession } = useAgentGroupsStore();
-  const setDirectory = useDirectoryStore((state) => state.setDirectory);
+  const { setCurrentSession, currentSessionId } = useSessionStore();
   
   // Find the currently selected session
   const selectedSession = React.useMemo(() => {
@@ -62,25 +38,41 @@ export const AgentGroupDetail: React.FC<AgentGroupDetailProps> = ({
     return group.sessions.find((s) => s.id === selectedSessionId) ?? group.sessions[0] ?? null;
   }, [group.sessions, selectedSessionId]);
   
-  // When selecting a session, switch to that worktree directory
+  // When selecting a session, switch to that OpenCode session
+  // NOTE: We intentionally do NOT change the global directory here to avoid
+  // re-triggering loadGroups() which would cause groups to disappear
   const handleSessionSelect = React.useCallback((session: AgentGroupSession) => {
     selectSession(session.id);
     
-    // Switch directory to the worktree path
-    if (session.path) {
-      setDirectory(session.path);
+    // Switch to the OpenCode session if we have one
+    if (session.opencodeSessionId) {
+      setCurrentSession(session.opencodeSessionId);
     }
-    
-    // TODO: Also need to switch to the OpenCode session associated with this worktree
-    // This would require mapping worktree paths to session IDs
-  }, [selectSession, setDirectory]);
+  }, [selectSession, setCurrentSession]);
   
-  // Auto-select first session when group changes
+  // Auto-select first session when group changes and sync OpenCode session
   React.useEffect(() => {
-    if (group.sessions.length > 0 && !selectedSessionId) {
-      handleSessionSelect(group.sessions[0]);
+    if (group.sessions.length > 0) {
+      const session = selectedSessionId 
+        ? group.sessions.find((s) => s.id === selectedSessionId) ?? group.sessions[0]
+        : group.sessions[0];
+      
+      if (session) {
+        // Always ensure the OpenCode session is synced
+        if (session.opencodeSessionId && session.opencodeSessionId !== currentSessionId) {
+          setCurrentSession(session.opencodeSessionId);
+        }
+        
+        // Update selection if not already selected
+        if (!selectedSessionId) {
+          selectSession(session.id);
+        }
+      }
     }
-  }, [group.name, group.sessions, selectedSessionId, handleSessionSelect]);
+  }, [group.name, group.sessions, selectedSessionId, currentSessionId, selectSession, setCurrentSession]);
+
+  // Check if the current OpenCode session matches the selected agent group session
+  const isSessionSynced = selectedSession?.opencodeSessionId === currentSessionId;
 
   return (
     <div className={cn('flex h-full flex-col bg-background', className)}>
@@ -108,17 +100,72 @@ export const AgentGroupDetail: React.FC<AgentGroupDetailProps> = ({
           </div>
         </div>
         
-        {/* Session Tabs */}
-        {group.sessions.length > 1 && (
-          <div className="flex gap-2 mt-4 overflow-x-auto pb-1">
-            {group.sessions.map((session) => (
-              <SessionTab
-                key={session.id}
-                session={session}
-                isSelected={selectedSession?.id === session.id}
-                onSelect={() => handleSessionSelect(session)}
-              />
-            ))}
+        {/* Model Selector Dropdown */}
+        {group.sessions.length > 0 && (
+          <div className="mt-3">
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="outline"
+                  className="w-full justify-between h-10 px-3"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    {selectedSession && (
+                      <>
+                        <ProviderLogo 
+                          providerId={selectedSession.providerId} 
+                          className="h-5 w-5 flex-shrink-0" 
+                        />
+                        <span className="truncate typography-body">
+                          {selectedSession.modelId}
+                        </span>
+                        {selectedSession.instanceNumber > 1 && (
+                          <span className="typography-meta text-muted-foreground">
+                            #{selectedSession.instanceNumber}
+                          </span>
+                        )}
+                      </>
+                    )}
+                  </div>
+                  <RiArrowDownSLine className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-[var(--radix-dropdown-menu-trigger-width)]">
+                {group.sessions.map((session) => (
+                  <DropdownMenuItem
+                    key={session.id}
+                    onClick={() => handleSessionSelect(session)}
+                    className="flex items-center gap-2 py-2"
+                  >
+                    <ProviderLogo 
+                      providerId={session.providerId} 
+                      className="h-5 w-5 flex-shrink-0" 
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="truncate typography-body">
+                          {session.modelId}
+                        </span>
+                        {session.instanceNumber > 1 && (
+                          <span className="typography-meta text-muted-foreground">
+                            #{session.instanceNumber}
+                          </span>
+                        )}
+                      </div>
+                      {session.branch && (
+                        <div className="flex items-center gap-1 typography-micro text-muted-foreground/60">
+                          <RiGitBranchLine className="h-3 w-3" />
+                          <span className="truncate">{session.worktreeMetadata?.label || session.branch}</span>
+                        </div>
+                      )}
+                    </div>
+                    {selectedSession?.id === session.id && (
+                      <RiCheckLine className="h-4 w-4 text-primary flex-shrink-0" />
+                    )}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         )}
       </div>
@@ -126,37 +173,55 @@ export const AgentGroupDetail: React.FC<AgentGroupDetailProps> = ({
       {/* Chat Content */}
       <div className="flex-1 min-h-0">
         {selectedSession ? (
-          <div className="h-full flex flex-col">
-            {/* Info banner about the worktree */}
-            <div className="px-4 py-2 bg-muted/30 border-b border-border/30">
-              <div className="flex items-center gap-2 typography-meta text-muted-foreground">
-                <ProviderLogo providerId={selectedSession.providerId} className="h-4 w-4" />
-                <span className="font-medium text-foreground">
-                  {selectedSession.displayLabel}
-                </span>
-                <span>·</span>
-                <span className="font-mono text-xs truncate">
-                  {selectedSession.path}
-                </span>
+          selectedSession.opencodeSessionId && isSessionSynced ? (
+            <ChatErrorBoundary sessionId={selectedSession.opencodeSessionId}>
+              <ChatContainer />
+            </ChatErrorBoundary>
+          ) : (
+            <div className="h-full flex flex-col">
+              {/* Info banner about the worktree */}
+              <div className="px-4 py-2 bg-muted/30 border-b border-border/30">
+                <div className="flex items-center gap-2 typography-meta text-muted-foreground">
+                  <ProviderLogo providerId={selectedSession.providerId} className="h-4 w-4" />
+                  <span className="font-medium text-foreground">
+                    {selectedSession.displayLabel}
+                  </span>
+                  <span>·</span>
+                  <span className="font-mono text-xs truncate">
+                    {selectedSession.path}
+                  </span>
+                </div>
+              </div>
+              
+              {/* Loading or no session state */}
+              <div className="flex-1 flex items-center justify-center">
+                <div className="text-center p-8">
+                  {selectedSession.opencodeSessionId ? (
+                    <>
+                      <p className="typography-body text-muted-foreground mb-2">
+                        Loading session for <span className="font-medium text-foreground">{selectedSession.displayLabel}</span>
+                      </p>
+                      <p className="typography-micro text-muted-foreground/60">
+                        Session ID: {selectedSession.opencodeSessionId}
+                      </p>
+                    </>
+                  ) : (
+                    <>
+                      <p className="typography-body text-muted-foreground mb-2">
+                        No session found for <span className="font-medium text-foreground">{selectedSession.displayLabel}</span>
+                      </p>
+                      <p className="typography-meta text-muted-foreground/60">
+                        Worktree: {selectedSession.path}
+                      </p>
+                      <p className="typography-meta text-muted-foreground/60 mt-1">
+                        Branch: {selectedSession.branch || 'Unknown'}
+                      </p>
+                    </>
+                  )}
+                </div>
               </div>
             </div>
-            
-            {/* Placeholder for actual chat - in a real implementation, 
-                this would load the session associated with this worktree */}
-            <div className="flex-1 flex items-center justify-center">
-              <div className="text-center p-8">
-                <p className="typography-body text-muted-foreground mb-2">
-                  Chat session for <span className="font-medium text-foreground">{selectedSession.displayLabel}</span>
-                </p>
-                <p className="typography-meta text-muted-foreground/60">
-                  Worktree: {selectedSession.path}
-                </p>
-                <p className="typography-meta text-muted-foreground/60 mt-1">
-                  Branch: {selectedSession.branch || 'Unknown'}
-                </p>
-              </div>
-            </div>
-          </div>
+          )
         ) : (
           <div className="h-full flex items-center justify-center">
             <p className="typography-body text-muted-foreground">

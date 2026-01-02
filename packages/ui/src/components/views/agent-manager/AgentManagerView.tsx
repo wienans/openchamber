@@ -5,6 +5,8 @@ import { AgentManagerEmptyState, type CreateAgentGroupParams } from './AgentMana
 import { AgentGroupDetail } from './AgentGroupDetail';
 import { cn } from '@/lib/utils';
 import { useAgentGroupsStore } from '@/stores/useAgentGroupsStore';
+import { useMultiRunStore } from '@/stores/useMultiRunStore';
+import type { CreateMultiRunParams, MultiRunFileAttachment } from '@/types/multirun';
 
 interface AgentManagerViewProps {
   className?: string;
@@ -18,6 +20,8 @@ export const AgentManagerView: React.FC<AgentManagerViewProps> = ({ className })
     loadGroups,
   } = useAgentGroupsStore();
 
+  const { createMultiRun, isLoading: isCreatingMultiRun } = useMultiRunStore();
+
   const handleGroupSelect = React.useCallback((groupName: string) => {
     selectGroup(groupName);
   }, [selectGroup]);
@@ -28,21 +32,38 @@ export const AgentManagerView: React.FC<AgentManagerViewProps> = ({ className })
   }, [selectGroup]);
 
   const handleCreateGroup = React.useCallback(async (params: CreateAgentGroupParams) => {
-    // TODO: Implement the actual group creation logic:
-    // 1. Create git worktrees for each model
-    // 2. Start OpenCode sessions in each worktree
-    // 3. Send the initial prompt to each session
-    // 4. Update the store with the new group
-    
-    console.log('Creating agent group:', params);
-    toast.success(`Creating agent group "${params.groupName}" with ${params.models.length} model(s)`);
-    
-    // For now, just reload groups after a delay (simulating creation)
-    // In real implementation, this would wait for worktrees to be created
-    setTimeout(() => {
-      loadGroups();
-    }, 1000);
-  }, [loadGroups]);
+    // Convert CreateAgentGroupParams to CreateMultiRunParams
+    const multiRunParams: CreateMultiRunParams = {
+      name: params.groupName,
+      prompt: params.prompt,
+      models: params.models.map((m) => ({
+        providerID: m.providerID,
+        modelID: m.modelID,
+        displayName: m.displayName,
+      })),
+      worktreeBaseBranch: params.baseBranch,
+      files: params.files?.map((f): MultiRunFileAttachment => ({
+        mime: f.mimeType,
+        filename: f.filename,
+        url: f.dataUrl,
+      })),
+    };
+
+    toast.info(`Creating agent group "${params.groupName}" with ${params.models.length} model(s)...`);
+
+    const result = await createMultiRun(multiRunParams);
+
+    if (result) {
+      toast.success(`Agent group "${params.groupName}" created with ${result.sessionIds.length} session(s)`);
+      // Reload groups to pick up the new worktrees and sessions
+      await loadGroups();
+      // Select the newly created group
+      selectGroup(params.groupName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').substring(0, 50));
+    } else {
+      const error = useMultiRunStore.getState().error;
+      toast.error(error || 'Failed to create agent group');
+    }
+  }, [createMultiRun, loadGroups, selectGroup]);
 
   const selectedGroup = getSelectedGroup();
 
@@ -62,7 +83,10 @@ export const AgentManagerView: React.FC<AgentManagerViewProps> = ({ className })
         {selectedGroup ? (
           <AgentGroupDetail group={selectedGroup} />
         ) : (
-          <AgentManagerEmptyState onCreateGroup={handleCreateGroup} />
+          <AgentManagerEmptyState 
+            onCreateGroup={handleCreateGroup}
+            isCreating={isCreatingMultiRun}
+          />
         )}
       </div>
     </div>

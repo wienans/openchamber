@@ -4,6 +4,7 @@ import { opencodeClient } from '@/lib/opencode/client';
 import { useDirectoryStore } from './useDirectoryStore';
 import type { WorktreeMetadata } from '@/types/worktree';
 import { listWorktrees, mapWorktreeToMetadata } from '@/lib/git/worktreeService';
+import type { Session } from '@opencode-ai/sdk';
 
 const OPENCHAMBER_DIR = '.openchamber';
 
@@ -15,6 +16,8 @@ const OPENCHAMBER_DIR = '.openchamber';
 export interface AgentGroupSession {
   /** Session ID (same as folder name for now) */
   id: string;
+  /** OpenCode session ID (from session.list API) */
+  opencodeSessionId: string | null;
   /** Full worktree path */
   path: string;
   /** Provider ID extracted from folder name */
@@ -101,6 +104,7 @@ function parseWorktreeFolderName(folderName: string): {
   const knownProviders = [
     'github-copilot',
     'opencode',
+    'openrouter',
     'anthropic',
     'openai',
     'google',
@@ -166,6 +170,55 @@ const normalize = (value: string): string => {
   return replaced.replace(/\/+$/, '');
 };
 
+/**
+ * Parse a session title to extract group, provider, model, and optional index.
+ * Title format: groupSlug/provider/model or groupSlug/provider/model/index
+ * 
+ * Example: "my-feature/anthropic/claude-sonnet-4-20250514" -> { groupSlug: "my-feature", provider: "anthropic", model: "claude-sonnet-4-20250514", index: undefined }
+ * Example: "my-feature/anthropic/claude-sonnet-4-20250514/2" -> { groupSlug: "my-feature", provider: "anthropic", model: "claude-sonnet-4-20250514", index: 2 }
+ */
+function parseSessionTitle(title: string | undefined): {
+  groupSlug: string;
+  provider: string;
+  model: string;
+  index?: number;
+} | null {
+  if (!title) return null;
+  
+  const parts = title.split('/');
+  if (parts.length < 3) return null;
+  
+  // Check if last part is a number (index)
+  const lastPart = parts[parts.length - 1];
+  const lastPartNum = parseInt(lastPart, 10);
+  const hasIndex = parts.length >= 4 && !isNaN(lastPartNum) && String(lastPartNum) === lastPart;
+  
+  if (hasIndex) {
+    // Format: groupSlug/provider/model/index
+    const groupSlug = parts.slice(0, -3).join('/');
+    const provider = parts[parts.length - 3];
+    const model = parts[parts.length - 2];
+    return { groupSlug, provider, model, index: lastPartNum };
+  } else {
+    // Format: groupSlug/provider/model
+    const groupSlug = parts.slice(0, -2).join('/');
+    const provider = parts[parts.length - 2];
+    const model = parts[parts.length - 1];
+    return { groupSlug, provider, model };
+  }
+}
+
+/**
+ * Generate a git-safe slug from a string (matches useMultiRunStore logic).
+ */
+const toGitSafeSlug = (value: string): string => {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .substring(0, 50);
+};
+
 export const useAgentGroupsStore = create<AgentGroupsStore>()(
   devtools(
     (set, get) => ({
@@ -182,11 +235,37 @@ export const useAgentGroupsStore = create<AgentGroupsStore>()(
           return;
         }
 
+        // Check if we're inside a .openchamber worktree - if so, don't reload
+        // This prevents groups from disappearing when switching to a worktree session
+        const normalizedCurrent = normalize(currentDirectory);
+        if (normalizedCurrent.includes(`/${OPENCHAMBER_DIR}/`)) {
+          // We're inside a worktree, don't reload groups
+          set({ isLoading: false });
+          return;
+        }
+
+        const previousGroups = get().groups;
         set({ isLoading: true, error: null });
 
         try {
-          const normalizedProject = normalize(currentDirectory);
+          const normalizedProject = normalizedCurrent;
           const openchamberPath = `${normalizedProject}/${OPENCHAMBER_DIR}`;
+
+          // Fetch all OpenCode sessions first
+          const apiClient = opencodeClient.getApiClient();
+          const allSessions: Session[] = [];
+          try {
+            // Get sessions from the main project directory
+            const mainResponse = await apiClient.session.list({
+              query: { directory: normalizedProject },
+            });
+            if (Array.isArray(mainResponse.data)) {
+              allSessions.push(...mainResponse.data);
+            }
+          } catch (err) {
+            console.debug('Failed to fetch sessions from main directory:', err);
+            // Don't fail completely, continue with filesystem-based discovery
+          }
 
           // First check if .openchamber directory exists
           let dirEntries: Array<{ name: string; path: string; isDirectory: boolean }> = [];
@@ -198,9 +277,48 @@ export const useAgentGroupsStore = create<AgentGroupsStore>()(
             
             if (openchamberExists) {
               dirEntries = await opencodeClient.listLocalDirectory(openchamberPath);
+              
+              // Also fetch sessions from each worktree directory
+              const worktreeDirs = dirEntries.filter((entry) => entry.isDirectory);
+              for (const worktreeDir of worktreeDirs) {
+                const worktreePath = normalize(worktreeDir.path) || `${openchamberPath}/${worktreeDir.name}`;
+                try {
+                  const response = await apiClient.session.list({
+                    query: { directory: worktreePath },
+                  });
+                  console.log('Fetched sessions for worktree:', worktreePath, response);
+                  if (Array.isArray(response.data)) {
+                    allSessions.push(...response.data);
+                  }
+                } catch {
+                  // Ignore errors for individual worktrees
+                }
+              }
             }
           } catch (err) {
             console.debug('Failed to list .openchamber directory:', err);
+          }
+
+          // Dedupe sessions by ID
+          const sessionMap = new Map<string, Session>();
+          for (const session of allSessions) {
+            sessionMap.set(session.id, session);
+          }
+          const dedupedSessions = Array.from(sessionMap.values());
+
+          // Build a map of session titles to session data for quick lookup
+          // Key format: "groupSlug:provider:modelSlug:index" where index may be undefined
+          // We slugify the model ID to match how worktree folder names are created
+          const sessionsByPattern = new Map<string, Session>();
+          for (const session of dedupedSessions) {
+            const parsed = parseSessionTitle(session.title);
+            if (parsed) {
+              // Slugify provider and model to match folder naming convention
+              const providerSlug = toGitSafeSlug(parsed.provider);
+              const modelSlug = toGitSafeSlug(parsed.model);
+              const key = `${parsed.groupSlug}:${providerSlug}:${modelSlug}:${parsed.index ?? 1}`;
+              sessionsByPattern.set(key, session);
+            }
           }
 
           // Filter to only directories (worktrees)
@@ -231,8 +349,14 @@ export const useAgentGroupsStore = create<AgentGroupsStore>()(
             const fullPath = normalize(folder.path) || `${openchamberPath}/${folder.name}`;
             const worktreeInfo = worktreeInfoMap.get(fullPath);
             
+            // Find matching OpenCode session by pattern
+            // The session title format is: groupSlug/provider/model or groupSlug/provider/model/index
+            const sessionKey = `${parsed.groupName}:${parsed.providerId}:${parsed.modelId}:${parsed.instanceNumber}`;
+            const matchedSession = sessionsByPattern.get(sessionKey);
+            
             const session: AgentGroupSession = {
               id: folder.name,
+              opencodeSessionId: matchedSession?.id ?? null,
               path: fullPath,
               providerId: parsed.providerId,
               modelId: parsed.modelId,
@@ -271,12 +395,14 @@ export const useAgentGroupsStore = create<AgentGroupsStore>()(
 
           // Sort groups by name (could also sort by lastActive)
           groups.sort((a, b) => a.name.localeCompare(b.name));
-
+          console.log(groups);
           set({ groups, isLoading: false, error: null });
         } catch (err) {
           console.error('Failed to load agent groups:', err);
+          // Preserve existing groups on error to avoid UI flickering
           set({
-            groups: [],
+            // Keep previousGroups if we have them, only clear if we had none
+            groups: previousGroups.length > 0 ? previousGroups : [],
             isLoading: false,
             error: err instanceof Error ? err.message : 'Failed to load agent groups',
           });

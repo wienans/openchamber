@@ -40,11 +40,14 @@ interface AgentManagerEmptyStateProps {
   className?: string;
   /** Called when the user submits to create a new agent group */
   onCreateGroup?: (params: CreateAgentGroupParams) => void;
+  /** Indicates if a group creation is in progress */
+  isCreating?: boolean;
 }
 
 export const AgentManagerEmptyState: React.FC<AgentManagerEmptyStateProps> = ({ 
   className,
   onCreateGroup,
+  isCreating = false,
 }) => {
   const [groupName, setGroupName] = React.useState('');
   const [prompt, setPrompt] = React.useState('');
@@ -116,6 +119,9 @@ export const AgentManagerEmptyState: React.FC<AgentManagerEmptyStateProps> = ({
     setAttachedFiles((prev) => prev.filter((f) => f.id !== id));
   };
 
+  // Use either local submitting state or external isCreating prop
+  const isSubmittingOrCreating = isSubmitting || isCreating;
+
   const isValid = Boolean(
     groupName.trim() && 
     prompt.trim() && 
@@ -127,7 +133,7 @@ export const AgentManagerEmptyState: React.FC<AgentManagerEmptyStateProps> = ({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     
-    if (!isValid || isSubmitting) return;
+    if (!isValid || isSubmittingOrCreating) return;
 
     setIsSubmitting(true);
 
@@ -293,7 +299,7 @@ export const AgentManagerEmptyState: React.FC<AgentManagerEmptyStateProps> = ({
               {/* Submit Button */}
                <button
                   type="submit"
-                  disabled={!isValid || isSubmitting}
+                  disabled={!isValid || isSubmittingOrCreating}
                   //className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:text-foreground transition-colors"
                   className={cn(
                       'flex items-center justify-center text-muted-foreground transition-none outline-none focus:outline-none flex-shrink-0',
@@ -303,7 +309,7 @@ export const AgentManagerEmptyState: React.FC<AgentManagerEmptyStateProps> = ({
                   )}
                   aria-label="Start Agent Group"
                 >
-                  {isSubmitting ? (
+                  {isSubmittingOrCreating ? (
                     <RiHourglassFill className="h-[18px] w-[18px] animate-spin" />
                   ) : (
                     <RiSendPlane2Line className="h-[18px] w-[18px]" />
