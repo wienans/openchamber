@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+- VS Code added Agent Manager, run the same promt in parallel with up to 5 models.
+- Change in Branch and Session Naming for Multi Run, <groupSlug>/<provider>/<modelSlug>/<index>
+
 ## [1.4.1] - 2026-01-02
 
 - Added the ability to select the same model multiple times in multi-agent runs for response comparison.
