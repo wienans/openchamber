@@ -168,9 +168,14 @@ export const useMultiRunStore = create<MultiRunStore>()(
                 startPoint,
               });
 
+              // Session title format: groupSlug/provider/model (or groupSlug/provider/model/index for duplicates)
+              const sessionTitle = count > 1
+                ? `${groupSlug}/${model.providerID}/${model.modelID}/${index}`
+                : `${groupSlug}/${model.providerID}/${model.modelID}`;
+
               const session = await opencodeClient.withDirectory(
                 worktreeMetadata.path,
-                () => opencodeClient.createSession({ title: `${model.providerID}/${model.modelID}` })
+                () => opencodeClient.createSession({ title: sessionTitle })
               );
 
               useSessionStore.getState().setWorktreeMetadata(session.id, worktreeMetadata);
