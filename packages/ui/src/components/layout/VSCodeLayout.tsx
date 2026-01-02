@@ -54,10 +54,6 @@ export const VSCodeLayout: React.FC = () => {
     setCurrentView('sessions');
   }, []);
 
-  const handleOpenAgentManager = React.useCallback(() => {
-    vscodeAPI?.openAgentManager();
-  }, [vscodeAPI]);
-
   // Listen for connection status changes
   React.useEffect(() => {
     const handler = (event: Event) => {
@@ -158,7 +154,6 @@ export const VSCodeLayout: React.FC = () => {
         <div className="flex flex-col h-full">
           <VSCodeHeader 
             title="Sessions" 
-            onAgentManager={handleOpenAgentManager}
           />
           <div className="flex-1 overflow-hidden">
             <SessionSidebar

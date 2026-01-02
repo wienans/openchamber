@@ -44,10 +44,8 @@ export const AgentGroupDetail: React.FC<AgentGroupDetailProps> = ({
   const handleSessionSelect = React.useCallback((session: AgentGroupSession) => {
     selectSession(session.id);
     
-    // Switch to the OpenCode session if we have one
-    if (session.opencodeSessionId) {
-      setCurrentSession(session.opencodeSessionId);
-    }
+    // Switch to the OpenCode session
+    setCurrentSession(session.id);
   }, [selectSession, setCurrentSession]);
   
   // Auto-select first session when group changes and sync OpenCode session
@@ -59,8 +57,8 @@ export const AgentGroupDetail: React.FC<AgentGroupDetailProps> = ({
       
       if (session) {
         // Always ensure the OpenCode session is synced
-        if (session.opencodeSessionId && session.opencodeSessionId !== currentSessionId) {
-          setCurrentSession(session.opencodeSessionId);
+        if (session.id !== currentSessionId) {
+          setCurrentSession(session.id);
         }
         
         // Update selection if not already selected
@@ -72,7 +70,7 @@ export const AgentGroupDetail: React.FC<AgentGroupDetailProps> = ({
   }, [group.name, group.sessions, selectedSessionId, currentSessionId, selectSession, setCurrentSession]);
 
   // Check if the current OpenCode session matches the selected agent group session
-  const isSessionSynced = selectedSession?.opencodeSessionId === currentSessionId;
+  const isSessionSynced = selectedSession?.id === currentSessionId;
 
   return (
     <div className={cn('flex h-full flex-col bg-background', className)}>
@@ -173,8 +171,8 @@ export const AgentGroupDetail: React.FC<AgentGroupDetailProps> = ({
       {/* Chat Content */}
       <div className="flex-1 min-h-0">
         {selectedSession ? (
-          selectedSession.opencodeSessionId && isSessionSynced ? (
-            <ChatErrorBoundary sessionId={selectedSession.opencodeSessionId}>
+          isSessionSynced ? (
+            <ChatErrorBoundary sessionId={selectedSession.id}>
               <ChatContainer />
             </ChatErrorBoundary>
           ) : (
@@ -196,28 +194,12 @@ export const AgentGroupDetail: React.FC<AgentGroupDetailProps> = ({
               {/* Loading or no session state */}
               <div className="flex-1 flex items-center justify-center">
                 <div className="text-center p-8">
-                  {selectedSession.opencodeSessionId ? (
-                    <>
-                      <p className="typography-body text-muted-foreground mb-2">
-                        Loading session for <span className="font-medium text-foreground">{selectedSession.displayLabel}</span>
-                      </p>
-                      <p className="typography-micro text-muted-foreground/60">
-                        Session ID: {selectedSession.opencodeSessionId}
-                      </p>
-                    </>
-                  ) : (
-                    <>
-                      <p className="typography-body text-muted-foreground mb-2">
-                        No session found for <span className="font-medium text-foreground">{selectedSession.displayLabel}</span>
-                      </p>
-                      <p className="typography-meta text-muted-foreground/60">
-                        Worktree: {selectedSession.path}
-                      </p>
-                      <p className="typography-meta text-muted-foreground/60 mt-1">
-                        Branch: {selectedSession.branch || 'Unknown'}
-                      </p>
-                    </>
-                  )}
+                  <p className="typography-body text-muted-foreground mb-2">
+                    Loading session for <span className="font-medium text-foreground">{selectedSession.displayLabel}</span>
+                  </p>
+                  <p className="typography-micro text-muted-foreground/60">
+                    Session ID: {selectedSession.id}
+                  </p>
                 </div>
               </div>
             </div>

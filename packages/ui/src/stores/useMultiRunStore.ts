@@ -145,7 +145,7 @@ export const useMultiRunStore = create<MultiRunStore>()(
             const modelSlug = toModelSlug(model.providerID, model.modelID);
             // Append index only when same model is selected multiple times
             const branch = count > 1
-              ? generateBranchName(groupSlug, `${modelSlug}-${index}`)
+              ? generateBranchName(groupSlug, `${modelSlug}/${index}`)
               : generateBranchName(groupSlug, modelSlug);
 
             if (!branch) {

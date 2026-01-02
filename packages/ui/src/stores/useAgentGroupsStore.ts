@@ -9,22 +9,25 @@ import type { Session } from '@opencode-ai/sdk';
 const OPENCHAMBER_DIR = '.openchamber';
 
 /**
- * Parsed agent group from .openchamber folder structure.
- * Folder names follow pattern: `group-name-provider-model-<count>`
- * Example: `agent-manager-2-github-copilot-claude-opus-4-5-1`
+ * Agent group session parsed from OpenCode session titles.
+ * Session titles follow pattern: `groupSlug/provider/model` or `groupSlug/provider/model/index`
+ * Model can contain `/` for creator/model format (e.g., `anthropic/claude-opus-4-5`)
+ *
+ * Examples:
+ * - `feature/opencode/claude-sonnet-4-5` → group="feature", provider="opencode", model="claude-sonnet-4-5"
+ * - `feature/opencode/claude-sonnet-4-1/2` → group="feature", provider="opencode", model="claude-sonnet-4-1", index=2
+ * - `feature/openrouter/anthropic/claude-opus-4-5` → group="feature", provider="openrouter", model="anthropic/claude-opus-4-5"
  */
 export interface AgentGroupSession {
-  /** Session ID (same as folder name for now) */
+  /** OpenCode session ID */
   id: string;
-  /** OpenCode session ID (from session.list API) */
-  opencodeSessionId: string | null;
-  /** Full worktree path */
+  /** Full worktree path (from session.directory) */
   path: string;
-  /** Provider ID extracted from folder name */
+  /** Provider ID extracted from title */
   providerId: string;
-  /** Model ID extracted from folder name */
+  /** Model ID extracted from title (may contain / for creator/model format) */
   modelId: string;
-  /** Instance number for duplicate model selections */
+  /** Instance number for duplicate model selections (default: 1) */
   instanceNumber: number;
   /** Branch name associated with this worktree */
   branch: string;
@@ -39,14 +42,14 @@ export interface AgentGroup {
   name: string;
   /** Sessions within this group (one per model instance) */
   sessions: AgentGroupSession[];
-  /** Timestamp of last activity (most recent session) */
+  /** Timestamp of last activity (most recent session update) */
   lastActive: number;
   /** Total session count */
   sessionCount: number;
 }
 
 interface AgentGroupsState {
-  /** All discovered agent groups from .openchamber folder */
+  /** All discovered agent groups from session titles */
   groups: AgentGroup[];
   /** Currently selected group name */
   selectedGroupName: string | null;
@@ -59,7 +62,7 @@ interface AgentGroupsState {
 }
 
 interface AgentGroupsActions {
-  /** Load/refresh agent groups from .openchamber folder */
+  /** Load/refresh agent groups from OpenCode sessions */
   loadGroups: () => Promise<void>;
   /** Select a group */
   selectGroup: (groupName: string | null) => void;
@@ -75,94 +78,6 @@ interface AgentGroupsActions {
 
 type AgentGroupsStore = AgentGroupsState & AgentGroupsActions;
 
-/**
- * Parse a worktree folder name into group components.
- * Expected format: `<group-name>-<provider>-<model>-<instance>`
- * 
- * Example: "agent-manager-2-github-copilot-claude-opus-4-5-1"
- * - groupName: "agent-manager-2"
- * - provider: "github-copilot"
- * - model: "claude-opus-4-5"
- * - instance: 1
- */
-function parseWorktreeFolderName(folderName: string): {
-  groupName: string;
-  providerId: string;
-  modelId: string;
-  instanceNumber: number;
-} | null {
-  // Match pattern: ends with -<number>
-  const instanceMatch = folderName.match(/-(\d+)$/);
-  if (!instanceMatch) {
-    return null;
-  }
-  
-  const instanceNumber = parseInt(instanceMatch[1], 10);
-  const withoutInstance = folderName.slice(0, -instanceMatch[0].length);
-  
-  // Known provider patterns (ordered by specificity)
-  const knownProviders = [
-    'github-copilot',
-    'opencode',
-    'openrouter',
-    'anthropic',
-    'openai',
-    'google',
-    'aws-bedrock',
-    'azure',
-    'groq',
-    'ollama',
-    'together',
-    'deepseek',
-    'mistral',
-    'cohere',
-    'fireworks',
-    'perplexity',
-    'xai',
-  ];
-  
-  // Try to find a known provider in the string
-  for (const provider of knownProviders) {
-    const providerIndex = withoutInstance.lastIndexOf(`-${provider}-`);
-    if (providerIndex !== -1) {
-      const groupName = withoutInstance.slice(0, providerIndex);
-      const afterProvider = withoutInstance.slice(providerIndex + provider.length + 2);
-      const modelId = afterProvider;
-      
-      if (groupName && modelId) {
-        return {
-          groupName,
-          providerId: provider,
-          modelId,
-          instanceNumber,
-        };
-      }
-    }
-  }
-  
-  // Fallback: try to split by common patterns
-  // Pattern: <group>-<single-word-provider>-<model>-<instance>
-  const parts = withoutInstance.split('-');
-  if (parts.length >= 3) {
-    // Assume last part is model, second-to-last might be provider
-    // This is a heuristic and may need adjustment
-    const potentialModel = parts.slice(-2).join('-');
-    const potentialProvider = parts.slice(-3, -2).join('-');
-    const potentialGroup = parts.slice(0, -3).join('-');
-    
-    if (potentialGroup && potentialProvider && potentialModel) {
-      return {
-        groupName: potentialGroup,
-        providerId: potentialProvider,
-        modelId: potentialModel,
-        instanceNumber,
-      };
-    }
-  }
-  
-  return null;
-}
-
 const normalize = (value: string): string => {
   if (!value) return '';
   const replaced = value.replace(/\\/g, '/');
@@ -171,53 +86,63 @@ const normalize = (value: string): string => {
 };
 
 /**
- * Parse a session title to extract group, provider, model, and optional index.
- * Title format: groupSlug/provider/model or groupSlug/provider/model/index
- * 
- * Example: "my-feature/anthropic/claude-sonnet-4-20250514" -> { groupSlug: "my-feature", provider: "anthropic", model: "claude-sonnet-4-20250514", index: undefined }
- * Example: "my-feature/anthropic/claude-sonnet-4-20250514/2" -> { groupSlug: "my-feature", provider: "anthropic", model: "claude-sonnet-4-20250514", index: 2 }
+ * Parse a session title to extract group, provider, model, and index.
+ * Title format: groupSlug/provider/model[/index]
+ *
+ * The groupSlug is always the first segment (cannot contain `/` as it's sanitized).
+ * The provider is always the second segment.
+ * Everything after the provider (excluding numeric index) is the model.
+ * Model can contain `/` for creator/model format.
+ *
+ * Examples:
+ * - "feature/opencode/claude-sonnet-4-5" → { groupSlug: "feature", provider: "opencode", model: "claude-sonnet-4-5", index: 1 }
+ * - "feature/opencode/claude-sonnet-4-1/2" → { groupSlug: "feature", provider: "opencode", model: "claude-sonnet-4-1", index: 2 }
+ * - "feature/openrouter/anthropic/claude-opus-4-5" → { groupSlug: "feature", provider: "openrouter", model: "anthropic/claude-opus-4-5", index: 1 }
+ * - "my-task/anthropic/claude-sonnet-4/1" → { groupSlug: "my-task", provider: "anthropic", model: "claude-sonnet-4", index: 1 }
  */
 function parseSessionTitle(title: string | undefined): {
   groupSlug: string;
   provider: string;
   model: string;
-  index?: number;
+  index: number;
 } | null {
   if (!title) return null;
-  
+
   const parts = title.split('/');
   if (parts.length < 3) return null;
-  
-  // Check if last part is a number (index)
+
+  // First part is always groupSlug (cannot contain / as it's sanitized by toGitSafeSlug)
+  const groupSlug = parts[0];
+  if (!groupSlug) return null;
+
+  // Second part is always provider
+  const provider = parts[1];
+  if (!provider) return null;
+
+  // Check if last part is a numeric index
   const lastPart = parts[parts.length - 1];
   const lastPartNum = parseInt(lastPart, 10);
   const hasIndex = parts.length >= 4 && !isNaN(lastPartNum) && String(lastPartNum) === lastPart;
-  
-  if (hasIndex) {
-    // Format: groupSlug/provider/model/index
-    const groupSlug = parts.slice(0, -3).join('/');
-    const provider = parts[parts.length - 3];
-    const model = parts[parts.length - 2];
-    return { groupSlug, provider, model, index: lastPartNum };
-  } else {
-    // Format: groupSlug/provider/model
-    const groupSlug = parts.slice(0, -2).join('/');
-    const provider = parts[parts.length - 2];
-    const model = parts[parts.length - 1];
-    return { groupSlug, provider, model };
-  }
-}
 
-/**
- * Generate a git-safe slug from a string (matches useMultiRunStore logic).
- */
-const toGitSafeSlug = (value: string): string => {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .substring(0, 50);
-};
+  // Model is everything from parts[2] to end (excluding index if present)
+  const modelParts = hasIndex
+    ? parts.slice(2, -1)
+    : parts.slice(2);
+
+  // Must have at least one model part
+  if (modelParts.length === 0) {
+    return null;
+  }
+
+  const model = modelParts.join('/');
+
+  return {
+    groupSlug,
+    provider,
+    model,
+    index: hasIndex ? lastPartNum : 1,
+  };
+}
 
 export const useAgentGroupsStore = create<AgentGroupsStore>()(
   devtools(
@@ -248,160 +173,92 @@ export const useAgentGroupsStore = create<AgentGroupsStore>()(
         set({ isLoading: true, error: null });
 
         try {
-          const normalizedProject = normalizedCurrent;
-          const openchamberPath = `${normalizedProject}/${OPENCHAMBER_DIR}`;
-
-          // Fetch all OpenCode sessions first
           const apiClient = opencodeClient.getApiClient();
-          const allSessions: Session[] = [];
-          try {
-            // Get sessions from the main project directory
-            const mainResponse = await apiClient.session.list({
-              query: { directory: normalizedProject },
-            });
-            if (Array.isArray(mainResponse.data)) {
-              allSessions.push(...mainResponse.data);
-            }
-          } catch (err) {
-            console.debug('Failed to fetch sessions from main directory:', err);
-            // Don't fail completely, continue with filesystem-based discovery
-          }
 
-          // First check if .openchamber directory exists
-          let dirEntries: Array<{ name: string; path: string; isDirectory: boolean }> = [];
-          try {
-            const projectEntries = await opencodeClient.listLocalDirectory(normalizedProject);
-            const openchamberExists = projectEntries.some(
-              (entry) => entry.name === OPENCHAMBER_DIR && entry.isDirectory
-            );
-            
-            if (openchamberExists) {
-              dirEntries = await opencodeClient.listLocalDirectory(openchamberPath);
-              
-              // Also fetch sessions from each worktree directory
-              const worktreeDirs = dirEntries.filter((entry) => entry.isDirectory);
-              for (const worktreeDir of worktreeDirs) {
-                const worktreePath = normalize(worktreeDir.path) || `${openchamberPath}/${worktreeDir.name}`;
-                try {
-                  const response = await apiClient.session.list({
-                    query: { directory: worktreePath },
-                  });
-                  console.log('Fetched sessions for worktree:', worktreePath, response);
-                  if (Array.isArray(response.data)) {
-                    allSessions.push(...response.data);
-                  }
-                } catch {
-                  // Ignore errors for individual worktrees
-                }
-              }
-            }
-          } catch (err) {
-            console.debug('Failed to list .openchamber directory:', err);
-          }
-
-          // Dedupe sessions by ID
-          const sessionMap = new Map<string, Session>();
-          for (const session of allSessions) {
-            sessionMap.set(session.id, session);
-          }
-          const dedupedSessions = Array.from(sessionMap.values());
-
-          // Build a map of session titles to session data for quick lookup
-          // Key format: "groupSlug:provider:modelSlug:index" where index may be undefined
-          // We slugify the model ID to match how worktree folder names are created
-          const sessionsByPattern = new Map<string, Session>();
-          for (const session of dedupedSessions) {
-            const parsed = parseSessionTitle(session.title);
-            if (parsed) {
-              // Slugify provider and model to match folder naming convention
-              const providerSlug = toGitSafeSlug(parsed.provider);
-              const modelSlug = toGitSafeSlug(parsed.model);
-              const key = `${parsed.groupSlug}:${providerSlug}:${modelSlug}:${parsed.index ?? 1}`;
-              sessionsByPattern.set(key, session);
-            }
-          }
-
-          // Filter to only directories (worktrees)
-          const worktreeFolders = dirEntries.filter((entry) => entry.isDirectory);
+          // Fetch all sessions from the main project directory
+          // All worktree sessions are visible from here
+          const response = await apiClient.session.list({
+            query: { directory: normalizedCurrent },
+          });
+          const allSessions: Session[] = Array.isArray(response.data) ? response.data : [];
 
           // Get git worktree info for metadata
-          let worktreeInfoList: Awaited<ReturnType<typeof listWorktrees>> = [];
+          let worktreeInfoMap = new Map<string, Awaited<ReturnType<typeof listWorktrees>>[number]>();
           try {
-            worktreeInfoList = await listWorktrees(normalizedProject);
-          } catch (err) {
-            console.debug('Failed to list git worktrees:', err);
+            const worktreeInfoList = await listWorktrees(normalizedCurrent);
+            worktreeInfoMap = new Map(
+              worktreeInfoList.map((info) => [normalize(info.worktree), info])
+            );
+          } catch {
+            console.debug('Failed to list git worktrees');
           }
 
-          // Create a map for quick lookup
-          const worktreeInfoMap = new Map(
-            worktreeInfoList.map((info) => [normalize(info.worktree), info])
-          );
-
-          // Parse folders and group by group name
+          // Parse sessions and group by groupSlug
           const groupsMap = new Map<string, AgentGroupSession[]>();
 
-          for (const folder of worktreeFolders) {
-            const parsed = parseWorktreeFolderName(folder.name);
-            if (!parsed) {
-              continue;
-            }
+          for (const session of allSessions) {
+            const parsed = parseSessionTitle(session.title);
+            if (!parsed) continue; // Skip sessions without valid agent group title
 
-            const fullPath = normalize(folder.path) || `${openchamberPath}/${folder.name}`;
-            const worktreeInfo = worktreeInfoMap.get(fullPath);
-            
-            // Find matching OpenCode session by pattern
-            // The session title format is: groupSlug/provider/model or groupSlug/provider/model/index
-            const sessionKey = `${parsed.groupName}:${parsed.providerId}:${parsed.modelId}:${parsed.instanceNumber}`;
-            const matchedSession = sessionsByPattern.get(sessionKey);
-            
-            const session: AgentGroupSession = {
-              id: folder.name,
-              opencodeSessionId: matchedSession?.id ?? null,
-              path: fullPath,
-              providerId: parsed.providerId,
-              modelId: parsed.modelId,
-              instanceNumber: parsed.instanceNumber,
+            const sessionPath = normalize(session.directory);
+            const worktreeInfo = worktreeInfoMap.get(sessionPath);
+
+            const agentSession: AgentGroupSession = {
+              id: session.id,
+              path: sessionPath,
+              providerId: parsed.provider,
+              modelId: parsed.model,
+              instanceNumber: parsed.index,
               branch: worktreeInfo?.branch ?? '',
-              displayLabel: `${parsed.providerId}/${parsed.modelId}`,
+              displayLabel: `${parsed.provider}/${parsed.model}`,
               worktreeMetadata: worktreeInfo
-                ? mapWorktreeToMetadata(normalizedProject, worktreeInfo)
+                ? mapWorktreeToMetadata(normalizedCurrent, worktreeInfo)
                 : undefined,
             };
 
-            const existing = groupsMap.get(parsed.groupName);
+            const existing = groupsMap.get(parsed.groupSlug);
             if (existing) {
-              existing.push(session);
+              existing.push(agentSession);
             } else {
-              groupsMap.set(parsed.groupName, [session]);
+              groupsMap.set(parsed.groupSlug, [agentSession]);
             }
           }
 
           // Convert map to array and sort
           const groups: AgentGroup[] = Array.from(groupsMap.entries()).map(
-            ([name, sessions]) => ({
-              name,
-              sessions: sessions.sort((a, b) => {
-                // Sort by provider, then model, then instance
-                const providerCmp = a.providerId.localeCompare(b.providerId);
-                if (providerCmp !== 0) return providerCmp;
-                const modelCmp = a.modelId.localeCompare(b.modelId);
-                if (modelCmp !== 0) return modelCmp;
-                return a.instanceNumber - b.instanceNumber;
-              }),
-              lastActive: Date.now(), // TODO: Get actual timestamp from session metadata
-              sessionCount: sessions.length,
-            })
+            ([name, sessions]) => {
+              // Find the most recent session update time for lastActive
+              const lastActive = sessions.reduce((max, s) => {
+                // Find the original session to get the time
+                const originalSession = allSessions.find((os) => os.id === s.id);
+                const updatedTime = originalSession?.time?.updated ?? 0;
+                return Math.max(max, updatedTime);
+              }, 0);
+
+              return {
+                name,
+                sessions: sessions.sort((a, b) => {
+                  // Sort by provider, then model, then instance
+                  const providerCmp = a.providerId.localeCompare(b.providerId);
+                  if (providerCmp !== 0) return providerCmp;
+                  const modelCmp = a.modelId.localeCompare(b.modelId);
+                  if (modelCmp !== 0) return modelCmp;
+                  return a.instanceNumber - b.instanceNumber;
+                }),
+                lastActive: lastActive || Date.now(),
+                sessionCount: sessions.length,
+              };
+            }
           );
 
-          // Sort groups by name (could also sort by lastActive)
+          // Sort groups by name
           groups.sort((a, b) => a.name.localeCompare(b.name));
-          console.log(groups);
+
           set({ groups, isLoading: false, error: null });
         } catch (err) {
           console.error('Failed to load agent groups:', err);
           // Preserve existing groups on error to avoid UI flickering
           set({
-            // Keep previousGroups if we have them, only clear if we had none
             groups: previousGroups.length > 0 ? previousGroups : [],
             isLoading: false,
             error: err instanceof Error ? err.message : 'Failed to load agent groups',
@@ -412,7 +269,7 @@ export const useAgentGroupsStore = create<AgentGroupsStore>()(
       selectGroup: (groupName) => {
         const { groups } = get();
         const group = groups.find((g) => g.name === groupName);
-        
+
         set({
           selectedGroupName: groupName,
           // Auto-select first session when selecting a group
