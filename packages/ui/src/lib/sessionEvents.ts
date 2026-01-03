@@ -1,4 +1,4 @@
-import type { Session } from '@opencode-ai/sdk';
+import type { Session } from '@opencode-ai/sdk/v2';
 import type { WorktreeMetadata } from '@/types/worktree';
 
 export type SessionDeleteRequest = {
@@ -29,7 +29,7 @@ export const sessionEvents = {
     };
   },
   requestDelete(payload: SessionDeleteRequest) {
-    if (!payload.sessions.length) {
+    if (!payload.sessions.length && payload.mode !== 'worktree') {
       return;
     }
     deleteListeners.forEach((listener) => listener(payload));

@@ -1,5 +1,5 @@
 import React from 'react';
-import type { Message, Part } from '@opencode-ai/sdk';
+import type { Message, Part } from '@opencode-ai/sdk/v2';
 import { useShallow } from 'zustand/react/shallow';
 
 import { defaultCodeDark, defaultCodeLight } from '@/lib/codeTheme';
@@ -578,11 +578,18 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
     }, [messageTextContent]);
 
     const revertToMessage = useSessionStore((state) => state.revertToMessage);
+    const forkFromMessage = useSessionStore((state) => state.forkFromMessage);
 
     const handleRevert = React.useCallback(() => {
         if (!sessionId || !message.info.id) return;
         revertToMessage(sessionId, message.info.id);
     }, [sessionId, message.info.id, revertToMessage]);
+
+    // NEW: Fork handler
+    const handleFork = React.useCallback(() => {
+        if (!sessionId || !message.info.id) return;
+        forkFromMessage(sessionId, message.info.id);
+    }, [sessionId, message.info.id, forkFromMessage]);
 
     const handleToggleTool = React.useCallback((toolId: string) => {
         setExpandedTools((prev) => {
@@ -788,6 +795,7 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                                         onAuxiliaryContentComplete={handleAuxiliaryContentComplete}
                                         agentMention={agentMention}
                                         onRevert={handleRevert}
+                                        onFork={isUser ? handleFork : undefined}
                                         errorMessage={assistantErrorText}
                                     />
                                 </div>
