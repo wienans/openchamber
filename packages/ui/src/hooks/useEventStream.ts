@@ -104,6 +104,9 @@ export const useEventStream = () => {
 
     try {
       const metadata = getWorktreeMetadata?.(currentSessionId);
+      // When the session is in a worktree, prefer the projectDirectory over the worktree path.
+      // This ensures SSE events from all worktrees in the project are received (fixes multi-run).
+      if (metadata?.projectDirectory) return metadata.projectDirectory;
       if (metadata?.path) return metadata.path;
     } catch (error) {
       console.warn('Failed to inspect worktree metadata for session directory:', error);
@@ -369,6 +372,9 @@ export const useEventStream = () => {
       return normalized.length > 1 ? normalized.replace(/\/+$/, '') : normalized;
     };
 
+    // NOTE: Unlike activeSessionDirectory (which uses projectDirectory for SSE subscription
+    // to receive events from all worktrees), status queries use the worktree path directly
+    // because each worktree has its own set of sessions with their own status.
     const resolveSessionDirectoryForStatus = (sessionId: string): string | null => {
       try {
         const metadata = getWorktreeMetadata?.(sessionId);
