@@ -87,7 +87,7 @@ export const useMultiRunStore = create<MultiRunStore>()(
         }
 
         if (models.length < 1) {
-          set({ error: 'Select at least 2 models' });
+          set({ error: 'Select at least 1 model' });
           return null;
         }
 
