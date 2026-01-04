@@ -176,6 +176,18 @@ export const AgentManagerEmptyState: React.FC<AgentManagerEmptyStateProps> = ({
     }
   };
 
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Enter submits if valid, Shift+Enter adds newline
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      if (isValid && !isSubmittingOrCreating) {
+        handleSubmit(e as unknown as React.FormEvent);
+      }
+      // If not valid, do nothing (no newline, no submit)
+    }
+    // Shift+Enter: default textarea behavior (adds newline)
+  };
+
   return (
     <div className={cn('flex flex-col items-center justify-center h-full w-full p-4', className)}>
       <form onSubmit={handleSubmit} className="w-full max-w-2xl space-y-4">
@@ -253,6 +265,7 @@ export const AgentManagerEmptyState: React.FC<AgentManagerEmptyStateProps> = ({
               id="prompt"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
+              onKeyDown={handleKeyDown}
               placeholder="Ask anything..."
               className="min-h-[100px] max-h-[300px] resize-none border-0 bg-transparent px-4 py-3 typography-markdown focus-visible:ring-0 focus-visible:ring-offset-0"
             />
