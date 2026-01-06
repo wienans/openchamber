@@ -170,6 +170,11 @@
           "type": "string",
           "default": "",
           "description": "URL of an external OpenCode API server. Leave empty to auto-start a local instance."
+        },
+        "openchamber.startupTimeout": {
+          "type": "number",
+          "default": 15000,
+          "description": "Timeout in milliseconds to wait for OpenCode server to start. Increase for network storage or slower systems (default: 15000ms)."
         }
       }
     }

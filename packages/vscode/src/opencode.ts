@@ -1,33 +1,14 @@
 import * as vscode from 'vscode';
-import { spawn, ChildProcess, spawnSync } from 'child_process';
+import { createOpencode } from '@opencode-ai/sdk/v2';
+import type { OpencodeClient } from '@opencode-ai/sdk/v2';
+import { spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 
-// Optimized timeouts for faster startup
-const PORT_DETECTION_TIMEOUT_MS = 10000;
-const READY_CHECK_TIMEOUT_MS = 12000;
-const READY_CHECK_INTERVAL_MS = 100;  // Fast polling during startup
+// Default timeout increased for Windows/network storage scenarios
+const DEFAULT_STARTUP_TIMEOUT_MS = 15000;
 const HEALTH_CHECK_INTERVAL_MS = 5000;
-const SHUTDOWN_TIMEOUT_MS = 3000;
-
-// Regex to detect port from CLI output (matches desktop pattern)
-const URL_REGEX = /https?:\/\/[^:\s]+:(\d+)(\/[^\s"']*)?/gi;
-const FALLBACK_PORT_REGEX = /(?:^|\s)(?:127\.0\.0\.1|localhost):(\d+)/i;
-
-const API_PREFIX_CANDIDATES = ['', '/api'] as const;
-
-const BIN_CANDIDATES = [
-  process.env.OPENCHAMBER_OPENCODE_PATH,
-  process.env.OPENCHAMBER_OPENCODE_BIN,
-  process.env.OPENCODE_PATH,
-  process.env.OPENCODE_BINARY,
-  '/opt/homebrew/bin/opencode',
-  '/usr/local/bin/opencode',
-  '/usr/bin/opencode',
-  path.join(os.homedir(), '.local/bin/opencode'),
-  path.join(os.homedir(), '.opencode/bin/opencode'),
-].filter(Boolean) as string[];
 
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
 
@@ -62,6 +43,28 @@ export interface OpenCodeManager {
   getDebugInfo(): OpenCodeDebugInfo;
   onStatusChange(callback: (status: ConnectionStatus, error?: string) => void): vscode.Disposable;
 }
+
+// SDK instance type
+interface OpencodeInstance {
+  client: OpencodeClient;
+  server: {
+    url: string;
+    close(): void;
+  };
+}
+
+// Binary candidates for CLI availability check (backward compatibility)
+const BIN_CANDIDATES = [
+  process.env.OPENCHAMBER_OPENCODE_PATH,
+  process.env.OPENCHAMBER_OPENCODE_BIN,
+  process.env.OPENCODE_PATH,
+  process.env.OPENCODE_BINARY,
+  '/opt/homebrew/bin/opencode',
+  '/usr/local/bin/opencode',
+  '/usr/bin/opencode',
+  path.join(os.homedir(), '.local/bin/opencode'),
+  path.join(os.homedir(), '.opencode/bin/opencode'),
+].filter(Boolean) as string[];
 
 function isExecutable(filePath: string): boolean {
   try {
@@ -124,7 +127,7 @@ function buildAugmentedPath(): string {
 }
 
 function resolveCliPath(): string | null {
-  // First check explicit candidates
+  // First check explicit candidates (backward compatibility for OPENCODE_BINARY)
   for (const candidate of BIN_CANDIDATES) {
     if (candidate && isExecutable(candidate)) {
       return candidate;
@@ -177,6 +180,25 @@ function resolveCliPath(): string | null {
   return null;
 }
 
+/**
+ * Prepend custom binary directory to PATH for SDK to find.
+ * This provides backward compatibility for OPENCODE_BINARY env var.
+ */
+function setupPathForCustomBinary(): void {
+  const customBinary = process.env.OPENCODE_BINARY || process.env.OPENCODE_PATH;
+  if (customBinary && fs.existsSync(customBinary)) {
+    const binDir = path.dirname(customBinary);
+    const currentPath = process.env.PATH || '';
+    if (!currentPath.split(path.delimiter).includes(binDir)) {
+      process.env.PATH = `${binDir}${path.delimiter}${currentPath}`;
+    }
+  }
+
+  // Also augment PATH with login shell paths
+  const augmentedPath = buildAugmentedPath();
+  process.env.PATH = augmentedPath;
+}
+
 async function checkHealth(apiUrl: string, quick = false): Promise<boolean> {
   try {
     const controller = new AbortController();
@@ -210,7 +232,7 @@ async function checkHealth(apiUrl: string, quick = false): Promise<boolean> {
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 export function createOpenCodeManager(_context: vscode.ExtensionContext): OpenCodeManager {
-  let childProcess: ChildProcess | null = null;
+  let opencodeInstance: OpencodeInstance | null = null;
   let status: ConnectionStatus = 'disconnected';
   let healthCheckInterval: NodeJS.Timeout | null = null;
   let lastError: string | undefined;
@@ -222,11 +244,10 @@ export function createOpenCodeManager(_context: vscode.ExtensionContext): OpenCo
   let lastConnectedAt: number | null = null;
   let lastExitCode: number | null = null;
 
-  // Port detection state (like desktop)
+  // Port detection state
   let detectedPort: number | null = null;
-  let portWaiters: Array<(port: number) => void> = [];
 
-  // OpenCode API prefix detection (some versions serve under /api)
+  // OpenCode API prefix detection
   let apiPrefix: string = '';
   let apiPrefixDetected = false;
 
@@ -234,6 +255,7 @@ export function createOpenCodeManager(_context: vscode.ExtensionContext): OpenCo
   const config = vscode.workspace.getConfiguration('openchamber');
   const configuredApiUrl = config.get<string>('apiUrl') || '';
   const useConfiguredUrl = configuredApiUrl && configuredApiUrl.trim().length > 0;
+  const startupTimeout = config.get<number>('startupTimeout') || DEFAULT_STARTUP_TIMEOUT_MS;
 
   // Parse configured URL to extract port if specified
   let configuredPort: number | null = null;
@@ -251,102 +273,6 @@ export function createOpenCodeManager(_context: vscode.ExtensionContext): OpenCo
   const cliPath = resolveCliPath();
   const cliAvailable = cliPath !== null;
 
-  const normalizeApiPrefix = (prefix: string): string => {
-    const trimmed = (prefix || '').trim();
-    if (!trimmed || trimmed === '/') return '';
-    const withLeading = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
-    return withLeading.endsWith('/') ? withLeading.slice(0, -1) : withLeading;
-  };
-
-  const inferPrefixFromLogPath = (candidatePath: string | null | undefined): string | null => {
-    if (!candidatePath) return null;
-    const normalized = normalizeApiPrefix(candidatePath);
-    if (normalized === '/api' || normalized.startsWith('/api/')) {
-      return '/api';
-    }
-    return null;
-  };
-
-  const setDetectedApiPrefix = (prefix: string) => {
-    const normalized = normalizeApiPrefix(prefix);
-    if (!apiPrefixDetected || apiPrefix !== normalized) {
-      apiPrefix = normalized;
-      apiPrefixDetected = true;
-    }
-  };
-
-  const buildApiBaseUrlFromPort = (port: number, prefixOverride?: string): string => {
-    const prefix = normalizeApiPrefix(prefixOverride !== undefined ? prefixOverride : apiPrefixDetected ? apiPrefix : '');
-    return `http://localhost:${port}${prefix}`;
-  };
-
-  const detectApiPrefixFromOutput = (text: string) => {
-    if (!text) return;
-    URL_REGEX.lastIndex = 0;
-    let match: RegExpExecArray | null;
-    while ((match = URL_REGEX.exec(text)) !== null) {
-      const port = parseInt(match[1], 10);
-      if (!Number.isFinite(port) || port <= 0) continue;
-      if (detectedPort !== null && port !== detectedPort) continue;
-
-      const inferred = inferPrefixFromLogPath(match[2] || '');
-      if (inferred !== null) {
-        setDetectedApiPrefix(inferred);
-        return;
-      }
-    }
-  };
-
-  const extractPrefixFromOpenApiDoc = (content: string): string | null => {
-    const match = content.match(/__OPENCODE_API_BASE__\s*=\s*['"]([^'"]+)['"]/);
-    if (!match?.[1]) return null;
-    try {
-      const parsed = new URL(match[1], 'http://localhost');
-      return normalizeApiPrefix(parsed.pathname || '');
-    } catch {
-      return normalizeApiPrefix(match[1]);
-    }
-  };
-
-  const detectApiPrefix = async (port: number): Promise<string> => {
-    if (apiPrefixDetected) return apiPrefix;
-
-    const origin = `http://localhost:${port}`;
-
-    // Try /doc for explicit base hints first (best signal when available).
-    for (const candidate of API_PREFIX_CANDIDATES) {
-      const prefix = normalizeApiPrefix(candidate);
-      try {
-        const response = await fetch(`${origin}${prefix}/doc`, { method: 'GET', headers: { Accept: '*/*' } });
-        if (!response.ok) continue;
-        const text = await response.text();
-        const extracted = extractPrefixFromOpenApiDoc(text);
-        if (extracted !== null) {
-          setDetectedApiPrefix(extracted);
-          return apiPrefix;
-        }
-      } catch {
-        // ignore
-      }
-    }
-
-    // Fallback: probe a stable endpoint under root vs /api.
-    for (const candidate of API_PREFIX_CANDIDATES) {
-      try {
-        const base = buildApiBaseUrlFromPort(port, candidate);
-        const response = await fetch(`${base}/config`, { method: 'GET', headers: { Accept: 'application/json' } });
-        if (!response.ok) continue;
-        await response.json().catch(() => null);
-        setDetectedApiPrefix(candidate);
-        return apiPrefix;
-      } catch {
-        // ignore
-      }
-    }
-
-    return apiPrefix;
-  };
-
   function setStatus(newStatus: ConnectionStatus, error?: string) {
     if (status !== newStatus || lastError !== error) {
       status = newStatus;
@@ -358,89 +284,12 @@ export function createOpenCodeManager(_context: vscode.ExtensionContext): OpenCo
     }
   }
 
-  function setDetectedPort(port: number) {
-    if (detectedPort !== port) {
-      detectedPort = port;
-
-      // Notify all waiters
-      const waiters = portWaiters;
-      portWaiters = [];
-      for (const notify of waiters) {
-        try {
-          notify(port);
-        } catch {
-          // Ignore waiter errors
-        }
-      }
-    }
-  }
-
-  function detectPortFromOutput(text: string) {
-    // Match URL pattern first (like desktop)
-    URL_REGEX.lastIndex = 0;
-    let match;
-    while ((match = URL_REGEX.exec(text)) !== null) {
-      const port = parseInt(match[1], 10);
-      if (Number.isFinite(port) && port > 0) {
-        setDetectedPort(port);
-        const inferred = inferPrefixFromLogPath(match[2] || '');
-        if (inferred !== null) {
-          setDetectedApiPrefix(inferred);
-        }
-        return;
-      }
-    }
-
-    // Fallback pattern
-    const fallbackMatch = FALLBACK_PORT_REGEX.exec(text);
-    if (fallbackMatch) {
-      const port = parseInt(fallbackMatch[1], 10);
-      if (Number.isFinite(port) && port > 0) {
-        setDetectedPort(port);
-      }
-    }
-  }
-
-  async function waitForPort(timeoutMs: number): Promise<number> {
-    if (detectedPort !== null) {
-      return detectedPort;
-    }
-
-    return new Promise((resolve, reject) => {
-      const onPortDetected = (port: number) => {
-        clearTimeout(timeout);
-        resolve(port);
-      };
-
-      const timeout = setTimeout(() => {
-        portWaiters = portWaiters.filter(cb => cb !== onPortDetected);
-        reject(new Error('Timed out waiting for OpenCode port detection'));
-      }, timeoutMs);
-
-      portWaiters.push(onPortDetected);
-    });
-  }
-
-  async function waitForReady(apiUrl: string, timeoutMs: number): Promise<boolean> {
-    const deadline = Date.now() + timeoutMs;
-
-    while (Date.now() < deadline) {
-      // Use quick health check during startup for faster response
-      if (await checkHealth(apiUrl, true)) {
-        return true;
-      }
-      await new Promise(r => setTimeout(r, READY_CHECK_INTERVAL_MS));
-    }
-
-    return false;
-  }
-
   function getApiUrl(): string | null {
     if (useConfiguredUrl && configuredApiUrl) {
       return configuredApiUrl.replace(/\/+$/, '');
     }
-    if (detectedPort !== null) {
-      return buildApiBaseUrlFromPort(detectedPort);
+    if (opencodeInstance) {
+      return opencodeInstance.server.url;
     }
     return null;
   }
@@ -493,7 +342,7 @@ export function createOpenCodeManager(_context: vscode.ExtensionContext): OpenCo
       return;
     }
 
-    // Check for existing running instance (only if port is known)
+    // Check for existing running instance
     const currentUrl = getApiUrl();
     if (currentUrl && await checkHealth(currentUrl)) {
       setStatus('connected');
@@ -516,106 +365,73 @@ export function createOpenCodeManager(_context: vscode.ExtensionContext): OpenCo
 
     setStatus('connecting');
 
-    // Reset port detection for fresh start
+    // Reset state for fresh start
     detectedPort = null;
     apiPrefix = '';
     apiPrefixDetected = false;
     lastExitCode = null;
 
     const spawnCwd = workingDirectory || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || os.homedir();
-
-    // Use port 0 for dynamic assignment unless user configured a specific port
-    const portArg = configuredPort !== null ? configuredPort.toString() : '0';
+    const prevCwd = process.cwd();
+    const shouldChdir = spawnCwd && fs.existsSync(spawnCwd);
 
     try {
-      const augmentedEnv = {
-        ...process.env,
-        PATH: buildAugmentedPath(),
-      };
+      // Setup PATH for backward compatibility with OPENCODE_BINARY
+      setupPathForCustomBinary();
 
-      childProcess = spawn(cliPath!, ['serve', '--port', portArg], {
-        cwd: spawnCwd,
-        env: augmentedEnv,
-        detached: false,
-        stdio: ['ignore', 'pipe', 'pipe'],
+      // Change to working directory before spawning (SDK uses process.cwd())
+      if (shouldChdir) {
+        process.chdir(spawnCwd);
+      }
+
+      // Use SDK's createOpencode function
+      opencodeInstance = await createOpencode({
+        hostname: '127.0.0.1',
+        port: configuredPort ?? 0, // Dynamic port unless configured
+        timeout: startupTimeout,
       });
 
-      childProcess.stdout?.on('data', (data) => {
-        const text = data.toString();
-        detectPortFromOutput(text);
-        detectApiPrefixFromOutput(text);
-      });
-
-      childProcess.stderr?.on('data', (data) => {
-        const text = data.toString();
-        detectPortFromOutput(text);
-        detectApiPrefixFromOutput(text);
-      });
-
-      childProcess.on('error', (err) => {
-        setStatus('error', `Failed to start OpenCode: ${err.message}`);
-        childProcess = null;
-      });
-
-      childProcess.on('exit', (code) => {
-        if (status !== 'disconnected') {
-          setStatus('disconnected', code !== 0 ? `OpenCode exited with code ${code}` : undefined);
-        }
-        childProcess = null;
-        detectedPort = null;
-        lastExitCode = typeof code === 'number' ? code : null;
-      });
-
-      // Wait for port detection (port comes from stdout/stderr)
+      // Extract port and prefix from server URL
       try {
-        await waitForPort(PORT_DETECTION_TIMEOUT_MS);
+        const url = new URL(opencodeInstance.server.url);
+        detectedPort = parseInt(url.port, 10) || null;
+        const pathPrefix = url.pathname;
+        if (pathPrefix && pathPrefix !== '/') {
+          apiPrefix = pathPrefix.endsWith('/') ? pathPrefix.slice(0, -1) : pathPrefix;
+          apiPrefixDetected = true;
+        }
       } catch {
-        setStatus('error', 'OpenCode did not report port in time');
-        await stop();
-        return;
+        // URL parsing failed, use defaults
       }
 
-      // Now wait for API to be ready
-      const detected = detectedPort;
-      if (detected !== null && !apiPrefixDetected) {
-        await detectApiPrefix(detected);
-      }
-
-      const apiUrl = getApiUrl();
-      if (!apiUrl) {
-        setStatus('error', 'Failed to determine OpenCode API URL');
-        await stop();
-        return;
-      }
-
-      const ready = await waitForReady(apiUrl, READY_CHECK_TIMEOUT_MS);
-      if (ready) {
-        setStatus('connected');
-        startHealthCheck();
-      } else {
-        setStatus('error', 'OpenCode API did not become ready in time');
-      }
+      setStatus('connected');
+      startHealthCheck();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      lastExitCode = -1; // Unknown exit code from SDK error
       setStatus('error', `Failed to start OpenCode: ${message}`);
+    } finally {
+      // Restore original working directory
+      if (shouldChdir) {
+        try {
+          process.chdir(prevCwd);
+        } catch {
+          // Ignore chdir errors
+        }
+      }
     }
   }
 
   async function stop(): Promise<void> {
     stopHealthCheck();
 
-    if (childProcess) {
+    if (opencodeInstance) {
       try {
-        childProcess.kill('SIGTERM');
-        // Wait for graceful shutdown
-        await new Promise(r => setTimeout(r, SHUTDOWN_TIMEOUT_MS));
-        if (childProcess && !childProcess.killed && childProcess.exitCode === null) {
-          childProcess.kill('SIGKILL');
-        }
+        opencodeInstance.server.close();
       } catch {
         // ignore
       }
-      childProcess = null;
+      opencodeInstance = null;
     }
 
     detectedPort = null;
