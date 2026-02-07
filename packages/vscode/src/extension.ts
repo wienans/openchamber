@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { createOpencodeClient, type Part, type PermissionRuleset, type TextPartInput } from '@opencode-ai/sdk/v2';
 import { ChatViewProvider } from './ChatViewProvider';
 import { AgentManagerPanelProvider } from './AgentManagerPanelProvider';
 import { SessionEditorPanelProvider } from './SessionEditorPanelProvider';
@@ -15,6 +16,38 @@ let activeSessionId: string | null = null;
 let activeSessionTitle: string | null = null;
 
 const SETTINGS_KEY = 'openchamber.settings';
+const INLINE_PROMPT_COMMAND = 'openchamber.inlinePrompt';
+
+const INLINE_ROLE_PROMPT = 'You are a software engineering assistant meant to create robust and canonical code';
+
+const INLINE_FUNCTION_PROMPT = `
+You have been given a function change.
+Create the contents that should be inserted at the cursor location inside the function.
+If the function already contains contents, use those as context
+Check the contents of the file you are in for any helper functions or context
+Your response should be only the code to insert at the cursor (no explanations).
+
+if there are DIRECTIONS, follow those when changing this function.  Do not deviate
+`.trim();
+
+const INLINE_SELECTION_PROMPT = `
+You receive a selection in VS Code that you need to replace with new code.
+The selection's contents may contain notes, incorporate the notes every time if there are some.
+consider the context of the selection and what you are supposed to be implementing
+Return only the code that should replace the selection (no explanations).
+`.trim();
+
+const inlinePromptDecoration = vscode.window.createTextEditorDecorationType({
+  backgroundColor: new vscode.ThemeColor('editor.rangeHighlightBackground'),
+  isWholeLine: false,
+  after: {
+    contentText: ' ⏳ OpenChamber',
+    color: new vscode.ThemeColor('editorCodeLens.foreground'),
+    margin: '0 0 0 0.5rem',
+  },
+});
+
+const pendingInlinePrompts = new Map<string, { editor: vscode.TextEditor; range: vscode.Range }>();
 
 const formatIso = (value: number | null | undefined) => {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '(none)';
@@ -31,8 +64,135 @@ const formatDurationMs = (value: number | null | undefined) => {
   return `${seconds}s`;
 };
 
+const formatLineRange = (range: vscode.Range): string => {
+  const startLine = range.start.line + 1;
+  const endLine = range.end.line + 1;
+  return startLine === endLine ? `${startLine}` : `${startLine}-${endLine}`;
+};
+
+const isTextPart = (part: Part): part is Part & { type: 'text'; text: string } => {
+  return part.type === 'text' && typeof (part as { text?: string }).text === 'string';
+};
+
+const collectTextParts = (parts: Part[]): string => {
+  return parts
+    .filter(isTextPart)
+    .map((part) => part.text)
+    .join('');
+};
+
+const registerInlinePrompt = (editor: vscode.TextEditor, range: vscode.Range): string => {
+  const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  pendingInlinePrompts.set(id, { editor, range });
+  editor.setDecorations(
+    inlinePromptDecoration,
+    Array.from(pendingInlinePrompts.values())
+      .filter((entry) => entry.editor === editor)
+      .map((entry) => entry.range)
+  );
+  return id;
+};
+
+const unregisterInlinePrompt = (id: string): void => {
+  const entry = pendingInlinePrompts.get(id);
+  if (!entry) return;
+  pendingInlinePrompts.delete(id);
+  entry.editor.setDecorations(
+    inlinePromptDecoration,
+    Array.from(pendingInlinePrompts.values())
+      .filter((other) => other.editor === entry.editor)
+      .map((other) => other.range)
+  );
+};
+
+const refreshInlineDecorations = (editor: vscode.TextEditor | undefined): void => {
+  if (!editor) return;
+  editor.setDecorations(
+    inlinePromptDecoration,
+    Array.from(pendingInlinePrompts.values())
+      .filter((entry) => entry.editor === editor)
+      .map((entry) => entry.range)
+  );
+};
+
+const findEnclosingFunctionSymbol = async (
+  document: vscode.TextDocument,
+  position: vscode.Position
+): Promise<vscode.DocumentSymbol | null> => {
+  const symbols = await vscode.commands.executeCommand<vscode.DocumentSymbol[]>(
+    'vscode.executeDocumentSymbolProvider',
+    document.uri
+  );
+  if (!symbols?.length) return null;
+
+  const targetKinds = new Set([
+    vscode.SymbolKind.Function,
+    vscode.SymbolKind.Method,
+    vscode.SymbolKind.Constructor,
+  ]);
+
+  const findIn = (items: vscode.DocumentSymbol[]): vscode.DocumentSymbol | null => {
+    for (const item of items) {
+      if (!item.range.contains(position)) {
+        continue;
+      }
+      const childMatch = findIn(item.children || []);
+      if (childMatch) return childMatch;
+      if (targetKinds.has(item.kind)) {
+        return item;
+      }
+    }
+    return null;
+  };
+
+  return findIn(symbols);
+};
+
+const buildInlinePrompt = (options: {
+  contextType: 'selection' | 'function' | 'line';
+  contextRange: vscode.Range;
+  contextText: string;
+  filePath: string;
+  fileText: string;
+  instructions: string;
+}): string => {
+  const directions = options.instructions.trim() || 'No additional directions provided.';
+  const location = `${options.filePath}:${formatLineRange(options.contextRange)}`;
+
+  if (options.contextType === 'selection') {
+    return `${INLINE_SELECTION_PROMPT}
+<DIRECTIONS>
+${directions}
+</DIRECTIONS>
+<SELECTION_LOCATION>
+${location}
+</SELECTION_LOCATION>
+<SELECTION_CONTENT>
+${options.contextText}
+</SELECTION_CONTENT>
+<FILE_CONTAINING_SELECTION>
+${options.fileText}
+</FILE_CONTAINING_SELECTION>`;
+  }
+
+  return `${INLINE_FUNCTION_PROMPT}
+<DIRECTIONS>
+${directions}
+</DIRECTIONS>
+<FUNCTION_LOCATION>
+${location}
+</FUNCTION_LOCATION>
+<FUNCTION_TEXT>
+${options.contextText}
+</FUNCTION_TEXT>
+<FILE_CONTAINING_FUNCTION>
+${options.fileText}
+</FILE_CONTAINING_FUNCTION>`;
+};
+
 export async function activate(context: vscode.ExtensionContext) {
   outputChannel = vscode.window.createOutputChannel('OpenChamber');
+  context.subscriptions.push(inlinePromptDecoration);
 
   let moveToRightSidebarScheduled = false;
 
@@ -325,6 +485,141 @@ export async function activate(context: vscode.ExtensionContext) {
   );
 
   context.subscriptions.push(
+    vscode.commands.registerCommand(INLINE_PROMPT_COMMAND, async () => {
+      const editor = vscode.window.activeTextEditor;
+      if (!editor) {
+        vscode.window.showWarningMessage('OpenChamber [Inline Prompt]: No active editor');
+        return;
+      }
+
+      if (!openCodeManager) {
+        vscode.window.showErrorMessage('OpenChamber [Inline Prompt]: OpenCode manager is unavailable');
+        return;
+      }
+
+      if (openCodeManager.getStatus() !== 'connected') {
+        try {
+          await openCodeManager.start();
+        } catch (error) {
+          vscode.window.showErrorMessage('OpenChamber [Inline Prompt]: OpenCode API is not ready yet');
+          outputChannel?.appendLine(
+            `[OpenChamber] Inline prompt failed to start API: ${error instanceof Error ? error.message : String(error)}`
+          );
+          return;
+        }
+      }
+
+      const selection = editor.selection;
+      const selectedText = editor.document.getText(selection);
+      const insertionRange = selection.isEmpty
+        ? new vscode.Range(selection.active, selection.active)
+        : new vscode.Range(selection.start, selection.end);
+
+      const filePath = vscode.workspace.asRelativePath(editor.document.uri);
+      const fileText = editor.document.getText();
+
+      let contextType: 'selection' | 'function' | 'line' = 'selection';
+      let contextRange = selection;
+      let contextText = selectedText;
+
+      if (!selectedText) {
+        const symbol = await findEnclosingFunctionSymbol(editor.document, selection.active);
+        if (symbol) {
+          contextType = 'function';
+          contextRange = symbol.range;
+          contextText = editor.document.getText(symbol.range);
+        } else {
+          contextType = 'line';
+          contextRange = editor.document.lineAt(selection.active.line).range;
+          contextText = editor.document.getText(contextRange);
+          vscode.window.showInformationMessage(
+            'OpenChamber [Inline Prompt]: No function found at cursor, using current line context'
+          );
+        }
+      }
+
+      const userInstructions = await vscode.window.showInputBox({
+        title: 'OpenChamber Inline Prompt',
+        prompt: 'What should be implemented?',
+        placeHolder: 'Add any additional instructions for the AI',
+        ignoreFocusOut: true,
+      });
+
+      if (userInstructions === undefined) {
+        return;
+      }
+
+      const promptText = buildInlinePrompt({
+        contextType,
+        contextRange,
+        contextText,
+        filePath,
+        fileText,
+        instructions: userInstructions,
+      });
+
+      const apiUrl = openCodeManager.getApiUrl();
+      if (!apiUrl) {
+        vscode.window.showErrorMessage('OpenChamber [Inline Prompt]: OpenCode API URL is unavailable');
+        return;
+      }
+
+      const workingDirectory = openCodeManager.getWorkingDirectory();
+      const indicatorRange = selection.isEmpty
+        ? editor.document.lineAt(selection.active.line).range
+        : selection;
+      const promptId = registerInlinePrompt(editor, indicatorRange);
+
+      try {
+        const permission: PermissionRuleset = { edit: 'deny' };
+        const client = createOpencodeClient({ baseUrl: apiUrl, directory: workingDirectory });
+        const session = await client.session.create(
+          {
+            directory: workingDirectory,
+            title: 'Inline Prompt',
+            permission,
+          },
+          { responseStyle: 'data', throwOnError: true }
+        );
+
+        const parts: TextPartInput[] = [{ type: 'text', text: promptText }];
+        const response = await client.session.prompt(
+          {
+            sessionID: session.id,
+            directory: workingDirectory,
+            agent: 'general',
+            system: INLINE_ROLE_PROMPT,
+            parts,
+          },
+          { responseStyle: 'data', throwOnError: true }
+        );
+
+        const output = collectTextParts(response.parts);
+        if (!output.trim()) {
+          vscode.window.showInformationMessage('OpenChamber [Inline Prompt]: No text output received');
+          return;
+        }
+
+        if (editor.document.isClosed) {
+          vscode.window.showWarningMessage('OpenChamber [Inline Prompt]: Editor was closed before insertion');
+          return;
+        }
+
+        await editor.edit((editBuilder) => {
+          editBuilder.replace(insertionRange, output);
+        });
+      } catch (error) {
+        vscode.window.showErrorMessage('OpenChamber [Inline Prompt]: Failed to get response from OpenCode');
+        outputChannel?.appendLine(
+          `[OpenChamber] Inline prompt error: ${error instanceof Error ? error.message : String(error)}`
+        );
+      } finally {
+        unregisterInlinePrompt(promptId);
+      }
+    })
+  );
+
+  context.subscriptions.push(
     vscode.commands.registerCommand('openchamber.newSession', () => {
       chatViewProvider?.createNewSession();
     })
@@ -517,6 +812,12 @@ export async function activate(context: vscode.ExtensionContext) {
       chatViewProvider?.updateTheme(theme.kind);
       agentManagerProvider?.updateTheme(theme.kind);
       sessionEditorProvider?.updateTheme(theme.kind);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.window.onDidChangeActiveTextEditor((editor) => {
+      refreshInlineDecorations(editor);
     })
   );
 
