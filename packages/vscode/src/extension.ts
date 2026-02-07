@@ -18,7 +18,7 @@ let activeSessionTitle: string | null = null;
 const SETTINGS_KEY = 'openchamber.settings';
 const INLINE_PROMPT_COMMAND = 'openchamber.inlinePrompt';
 
-const INLINE_ROLE_PROMPT = 'You are a software engineering assistant mean to create robust and conanical code';
+const INLINE_ROLE_PROMPT = 'You are a software engineering assistant meant to create robust and canonical code';
 
 const INLINE_FUNCTION_PROMPT = `
 You have been given a function change.
@@ -33,7 +33,7 @@ if there are DIRECTIONS, follow those when changing this function.  Do not devia
 const INLINE_SELECTION_PROMPT = `
 You receive a selection in VS Code that you need to replace with new code.
 The selection's contents may contain notes, incorporate the notes every time if there are some.
-consider the context of the selection and what you are suppose to be implementing
+consider the context of the selection and what you are supposed to be implementing
 Return only the code that should replace the selection (no explanations).
 `.trim();
 
